@@ -238,7 +238,7 @@ class TVAE(BaseSynthesizer):
             if weighted_ks > best_ks:
                 best_ks = weighted_ks
                 counter = 0
-                self.save(self._save_path)
+                self.save(self.save_path)
             else:
                 counter += 1
 
