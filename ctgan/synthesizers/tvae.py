@@ -220,7 +220,7 @@ class TVAE(BaseSynthesizer):
                 'Epoch': [i] * len(batch),
                 'Batch': batch,
                 'Loss': loss_values,
-                'KS': [weighted_ks]
+                'KS': [weighted_ks] * len(batch)
             })
             if not self.loss_values.empty:
                 self.loss_values = pd.concat([self.loss_values, epoch_loss_df]).reset_index(
