@@ -213,8 +213,8 @@ class TVAE(BaseSynthesizer):
             weighted_ks = 0
             for ix in range(train_data.shape[1] - 1):
                 ks = KSComplement.compute(train_data.iloc[:, ix], synthetic_data.iloc[:, ix])
-                weighted_ks += ks * self._weights[ix]
-            weighted_ks /= np.sum(self._weights)
+                weighted_ks += ks * self.weights[ix]
+            weighted_ks /= np.sum(self.weights)
 
             epoch_loss_df = pd.DataFrame({
                 'Epoch': [i] * len(batch),
