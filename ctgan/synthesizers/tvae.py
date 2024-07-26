@@ -12,6 +12,7 @@ from tqdm import tqdm
 from ctgan.data_transformer import DataTransformer
 from ctgan.synthesizers.base import BaseSynthesizer, random_state
 
+from sdmetrics.single_column import KSComplement
 
 class Encoder(Module):
     """Encoder for the TVAE.
@@ -107,6 +108,7 @@ class TVAE(BaseSynthesizer):
 
     def __init__(
         self,
+        save_path,
         embedding_dim=128,
         compress_dims=(128, 128),
         decompress_dims=(128, 128),
@@ -116,7 +118,11 @@ class TVAE(BaseSynthesizer):
         loss_factor=2,
         cuda=True,
         verbose=False,
+        patience=100,
+        weights=[],
     ):
+
+        self.save_path = save_path
         self.embedding_dim = embedding_dim
         self.compress_dims = compress_dims
         self.decompress_dims = decompress_dims
@@ -127,6 +133,8 @@ class TVAE(BaseSynthesizer):
         self.epochs = epochs
         self.loss_values = pd.DataFrame(columns=['Epoch', 'Batch', 'Loss'])
         self.verbose = verbose
+        self.patience = patience
+        self.weights = weights
 
         if not cuda or not torch.cuda.is_available():
             device = 'cpu'
@@ -150,10 +158,13 @@ class TVAE(BaseSynthesizer):
                 contain the integer indices of the columns. Otherwise, if it is
                 a ``pandas.DataFrame``, this list should contain the column names.
         """
+        if len(self.weights) == 0:
+            self.weights = np.ones(train_data.shape[1] - 1)
+
         self.transformer = DataTransformer()
         self.transformer.fit(train_data, discrete_columns)
-        train_data = self.transformer.transform(train_data)
-        dataset = TensorDataset(torch.from_numpy(train_data.astype('float32')).to(self._device))
+        train_data_transf = self.transformer.transform(train_data)
+        dataset = TensorDataset(torch.from_numpy(train_data_transf.astype('float32')).to(self._device))
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=False)
 
         data_dim = self.transformer.output_dimensions
@@ -163,12 +174,14 @@ class TVAE(BaseSynthesizer):
             list(encoder.parameters()) + list(self.decoder.parameters()), weight_decay=self.l2scale
         )
 
-        self.loss_values = pd.DataFrame(columns=['Epoch', 'Batch', 'Loss'])
+        self.loss_values = pd.DataFrame(columns=['Epoch', 'Batch', 'Loss', 'KS'])
         iterator = tqdm(range(self.epochs), disable=(not self.verbose))
         if self.verbose:
-            iterator_description = 'Loss: {loss:.3f}'
-            iterator.set_description(iterator_description.format(loss=0))
+            iterator_description = 'Loss: {loss:.3f} | KS: {ks:.2f}'
+            iterator.set_description(iterator_description.format(loss=0, ks=0))
 
+        best_ks = 0
+        counter = 0
         for i in iterator:
             loss_values = []
             batch = []
@@ -196,10 +209,18 @@ class TVAE(BaseSynthesizer):
                 batch.append(id_)
                 loss_values.append(loss.detach().cpu().item())
 
+            synthetic_data = self.sample(n=len(train_data))
+            weighted_ks = 0
+            for ix in range(train_data.shape[1] - 1):
+                ks = KSComplement.compute(train_data.iloc[:, ix], synthetic_data.iloc[:, ix])
+                weighted_ks += ks * self._weights[ix]
+            weighted_ks /= np.sum(self._weights)
+
             epoch_loss_df = pd.DataFrame({
                 'Epoch': [i] * len(batch),
                 'Batch': batch,
                 'Loss': loss_values,
+                'KS': [weighted_ks]
             })
             if not self.loss_values.empty:
                 self.loss_values = pd.concat([self.loss_values, epoch_loss_df]).reset_index(
@@ -210,8 +231,19 @@ class TVAE(BaseSynthesizer):
 
             if self.verbose:
                 iterator.set_description(
-                    iterator_description.format(loss=loss.detach().cpu().item())
+                    iterator_description.format(loss=loss.detach().cpu().item(), ks=weighted_ks)
                 )
+
+            # Early stopping
+            if weighted_ks > best_ks:
+                best_ks = weighted_ks
+                counter = 0
+                self.save(self._save_path)
+            else:
+                counter += 1
+
+            if counter == self._patience:
+                break
 
     @random_state
     def sample(self, samples):
