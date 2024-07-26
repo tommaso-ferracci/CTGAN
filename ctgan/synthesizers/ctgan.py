@@ -311,7 +311,7 @@ class CTGAN(BaseSynthesizer):
         """
         self._validate_discrete_columns(train_data, discrete_columns)
 
-        if not self._weights:
+        if self._weights == []:
             self._weights = np.ones(train_data.shape[1] - 1)
 
         if epochs is None:
