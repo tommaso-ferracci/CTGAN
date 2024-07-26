@@ -242,7 +242,7 @@ class TVAE(BaseSynthesizer):
             else:
                 counter += 1
 
-            if counter == self._patience:
+            if counter == self.patience:
                 break
 
     @random_state
