@@ -13,6 +13,7 @@ from ctgan.data_sampler import DataSampler
 from ctgan.data_transformer import DataTransformer
 from ctgan.synthesizers.base import BaseSynthesizer, random_state
 
+from sdmetrics.single_column import KSComplement
 
 class Discriminator(Module):
     """Discriminator for the CTGAN."""
@@ -145,6 +146,7 @@ class CTGAN(BaseSynthesizer):
 
     def __init__(
         self,
+        save_path,
         embedding_dim=128,
         generator_dim=(256, 256),
         discriminator_dim=(256, 256),
@@ -159,9 +161,12 @@ class CTGAN(BaseSynthesizer):
         epochs=300,
         pac=10,
         cuda=True,
+        patience=50,
+        weights=[],
     ):
         assert batch_size % 2 == 0
 
+        self._save_path = save_path
         self._embedding_dim = embedding_dim
         self._generator_dim = generator_dim
         self._discriminator_dim = discriminator_dim
@@ -177,6 +182,8 @@ class CTGAN(BaseSynthesizer):
         self._verbose = verbose
         self._epochs = epochs
         self.pac = pac
+        self._patience = patience
+        self._weights = weights
 
         if not cuda or not torch.cuda.is_available():
             device = 'cpu'
@@ -304,6 +311,9 @@ class CTGAN(BaseSynthesizer):
         """
         self._validate_discrete_columns(train_data, discrete_columns)
 
+        if not self._weights:
+            self._weights = np.ones(train_data.shape[1] - 1)
+
         if epochs is None:
             epochs = self._epochs
         else:
@@ -318,10 +328,10 @@ class CTGAN(BaseSynthesizer):
         self._transformer = DataTransformer()
         self._transformer.fit(train_data, discrete_columns)
 
-        train_data = self._transformer.transform(train_data)
+        train_data_transf = self._transformer.transform(train_data)
 
         self._data_sampler = DataSampler(
-            train_data, self._transformer.output_info_list, self._log_frequency
+            train_data_transf, self._transformer.output_info_list, self._log_frequency
         )
 
         data_dim = self._transformer.output_dimensions
@@ -351,13 +361,15 @@ class CTGAN(BaseSynthesizer):
         mean = torch.zeros(self._batch_size, self._embedding_dim, device=self._device)
         std = mean + 1
 
-        self.loss_values = pd.DataFrame(columns=['Epoch', 'Generator Loss', 'Distriminator Loss'])
+        self.loss_values = pd.DataFrame(columns=['Epoch', 'Generator Loss', 'Distriminator Loss', 'KS'])
 
         epoch_iterator = tqdm(range(epochs), disable=(not self._verbose))
         if self._verbose:
-            description = 'Gen. ({gen:.2f}) | Discrim. ({dis:.2f})'
-            epoch_iterator.set_description(description.format(gen=0, dis=0))
+            description = 'Gen. ({gen:.2f}) | Discrim. ({dis:.2f}) | KS ({ks:.2f})'
+            epoch_iterator.set_description(description.format(gen=0, dis=0, ks=0))
 
+        best_ks = 0
+        counter = 0
         steps_per_epoch = max(len(train_data) // self._batch_size, 1)
         for i in epoch_iterator:
             for id_ in range(steps_per_epoch):
@@ -368,7 +380,7 @@ class CTGAN(BaseSynthesizer):
                     if condvec is None:
                         c1, m1, col, opt = None, None, None, None
                         real = self._data_sampler.sample_data(
-                            train_data, self._batch_size, col, opt
+                            train_data_transf, self._batch_size, col, opt
                         )
                     else:
                         c1, m1, col, opt = condvec
@@ -379,7 +391,7 @@ class CTGAN(BaseSynthesizer):
                         perm = np.arange(self._batch_size)
                         np.random.shuffle(perm)
                         real = self._data_sampler.sample_data(
-                            train_data, self._batch_size, col[perm], opt[perm]
+                            train_data_transf, self._batch_size, col[perm], opt[perm]
                         )
                         c2 = c1[perm]
 
@@ -438,6 +450,13 @@ class CTGAN(BaseSynthesizer):
                 loss_g.backward()
                 optimizerG.step()
 
+            synthetic_data = self.sample(n=len(train_data))
+            weighted_ks = 0
+            for ix in range(train_data.shape[1] - 1):
+                ks = KSComplement.compute(train_data.iloc[:, ix], synthetic_data.iloc[:, ix])
+                weighted_ks += ks * self._weights[ix]
+            weighted_ks /= np.sum(self._weights)
+
             generator_loss = loss_g.detach().cpu().item()
             discriminator_loss = loss_d.detach().cpu().item()
 
@@ -445,6 +464,7 @@ class CTGAN(BaseSynthesizer):
                 'Epoch': [i],
                 'Generator Loss': [generator_loss],
                 'Discriminator Loss': [discriminator_loss],
+                'KS': [weighted_ks]
             })
             if not self.loss_values.empty:
                 self.loss_values = pd.concat([self.loss_values, epoch_loss_df]).reset_index(
@@ -455,8 +475,19 @@ class CTGAN(BaseSynthesizer):
 
             if self._verbose:
                 epoch_iterator.set_description(
-                    description.format(gen=generator_loss, dis=discriminator_loss)
+                    description.format(gen=generator_loss, dis=discriminator_loss, ks=weighted_ks)
                 )
+
+            # Early stopping
+            if weighted_ks > best_ks:
+                best_ks = weighted_ks
+                counter = 0
+                self.save(self._save_path)
+            else:
+                counter += 1
+
+            if counter == self._patience:
+                break
 
     @random_state
     def sample(self, n, condition_column=None, condition_value=None):
