@@ -209,7 +209,7 @@ class TVAE(BaseSynthesizer):
                 batch.append(id_)
                 loss_values.append(loss.detach().cpu().item())
 
-            synthetic_data = self.sample(n=len(train_data))
+            synthetic_data = self.sample(samples=len(train_data))
             weighted_ks = 0
             for ix in range(train_data.shape[1] - 1):
                 ks = KSComplement.compute(train_data.iloc[:, ix], synthetic_data.iloc[:, ix])
